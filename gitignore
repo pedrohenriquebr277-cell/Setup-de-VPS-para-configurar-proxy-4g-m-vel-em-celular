@@ -1,0 +1,7 @@
+# Nunca versionar blocos, chaves nem backups gerados
+bloco-*.txt
+cel[0-9]*
+*.pub
+revogados/
+backup-proxy4g-*/
+*.log
