@@ -34,6 +34,7 @@ info()  { echo "            $*"; }
 have()      { command -v "$1" >/dev/null 2>&1; }
 is_ip()     { [[ "${1:-}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 is_num()    { [[ "${1:-}" =~ ^[0-9]+$ ]]; }
+is_private_ip() { [[ "${1:-}" =~ ^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) ]]; }
 sshd_val()  { sshd -T 2>/dev/null | awk -v k="$1" '$1==k {sub(/^[^ ]+ /,""); print; exit}'; }
 ssh_svc()   { local s; for s in ssh sshd; do if systemctl cat "$s" >/dev/null 2>&1; then echo "$s"; return; fi; done; }
 host_has_ip() { ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -qx "$1"; }
@@ -119,6 +120,7 @@ p_conf() {
   is_ip "$IP"   || { err "IP publico invalido ('$IP'). Use PROXY_IP=x.x.x.x"; return; }
   is_ip "$BIND" || { err "BIND invalido ('$BIND'). Use PROXY_BIND=x.x.x.x"; return; }
   if ! host_has_ip "$BIND"; then err "o endereco $BIND nao existe nesta maquina (ip -4 addr)"; return; fi
+  if ! is_private_ip "$BIND"; then err "BIND $BIND e um IP publico: o proxy ficaria aberto para a internet (sem senha). Use 127.0.0.1 ou o gateway privado do Docker"; return; fi
   if [ "$cIP" != "$IP" ] || [ "$cSP" != "$SP" ] || [ "$cBIND" != "$BIND" ]; then
     if [ "$FIX" = 1 ]; then
       backup "$CONF"
@@ -223,12 +225,15 @@ ClientAliveCountMax 3
 GatewayPorts clientspecified
 PubkeyAuthentication yes
 CFG
-  if ! sshd -t 2>/tmp/proxy4g_sshd_err; then
-    err "config do sshd invalida, desfiz a alteracao: $(head -n1 /tmp/proxy4g_sshd_err)"
+  local serr; serr=$(mktemp)
+  if ! sshd -t 2>"$serr"; then
+    err "config do sshd invalida, desfiz a alteracao: $(head -n1 "$serr")"
+    rm -f "$serr"
     if [ "$had" = 1 ]; then cp -a "$BK/$(echo "$DROPIN" | tr / _)" "$DROPIN"; else rm -f "$DROPIN"; fi
     [ -f "$BK/_etc_ssh_sshd_config" ] && cp -a "$BK/_etc_ssh_sshd_config" /etc/ssh/sshd_config
     return
   fi
+  rm -f "$serr"
   if ! reload_sshd; then err "nao consegui recarregar o sshd (systemctl reload ssh)"; return; fi
   sleep 1
   if sshd_effective_ok; then fixed "configurei o sshd ($DROPIN) e recarreguei sem derrubar sessoes"
@@ -343,9 +348,11 @@ pkill -f 10-tunel.sh 2>/dev/null || true
 pkill -f 'tunel@' 2>/dev/null || true
 : > $H/tunel.log
 nohup sh $H/.termux/boot/10-tunel.sh > /dev/null 2>&1 &
-sleep 15
-if pgrep -f 'tunel@' > /dev/null; then echo "RESULTADO: TUNEL ATIVO"; else echo "RESULTADO: TUNEL FALHOU"; fi
-tail -n 5 $H/tunel.log
+sleep 20
+if grep -q 'caiu' $H/tunel.log; then echo "RESULTADO: TUNEL FALHOU (veja o erro abaixo e mande um print)"
+elif pgrep -f 'tunel@' > /dev/null; then echo "RESULTADO: TUNEL ATIVO"
+else echo "RESULTADO: TUNEL FALHOU"; fi
+tail -n 8 $H/tunel.log
 ls -l $H/.termux/boot
 rm -f $H/instalar.sh
 echo "FIM. Saia pelo botao Home. Nao digite exit. Deixe o Wi-Fi desligado."
@@ -418,8 +425,8 @@ cmd_validar() {
     ok "tunel conectado (porta $BIND:$pp aberta)"
   else
     err "tunel NAO conectado. O bloco nao rodou, o Termux foi fechado, ou o celular esta sem dados."
-    info "ultimas linhas do log do SSH sobre o tunel:"
-    (grep -h "$TUSER" /var/log/auth.log 2>/dev/null || journalctl -u ssh -u sshd --no-pager 2>/dev/null | grep "$TUSER") | tail -n 6 | sed 's/^/            /'
+    info "conexoes do tunel no SSH nos ultimos 30 min (vazio = o celular nem chegou aqui):"
+    (journalctl -u ssh -u sshd --since "30 min ago" --no-pager 2>/dev/null | grep "$TUSER" || true) | tail -n 6 | sed 's/^/            /'
     echo "${R}VALIDACAO FALHOU${Z}"; return 1
   fi
 
@@ -462,7 +469,8 @@ cmd_validar() {
   if [ "$ERRS" -gt 0 ]; then echo "${R}VALIDACAO FALHOU: $ERRS erro(s), $WARNS aviso(s).${Z}"; return 1; fi
   echo "${G}CELULAR $n OK${Z} ($WARNS aviso(s)). Na Evolution, por instancia, antes de ler o QR:"
   echo "  host: $BIND   port: $pp   protocol: socks5   username/password: vazios"
-  echo "Teste final: no celular, derrube o tunel (pkill -f tunel@); a instancia tem que perder conexao."
+  echo "Teste final: no celular, derrube o tunel DE VERDADE: pkill -f 10-tunel.sh; pkill -f tunel@  (so o segundo reconecta em 10 s). A instancia tem que perder conexao."
+  echo "Para religar: nohup sh ~/.termux/boot/10-tunel.sh >/dev/null 2>&1 &"
 }
 
 cmd_lista() {
